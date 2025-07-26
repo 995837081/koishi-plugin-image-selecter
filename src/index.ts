@@ -90,7 +90,7 @@ export function apply(ctx: Context, config: Config) {
   }
 
   // 存图指令
-  ctx.command(`${config.saveCommandName} [...图片]`)
+  ctx.command(`${config.saveCommandName} [...图片]`, { captureQuote: false })
     .userFields(['id', 'name', 'authority'])
     .action(async ({ session }, ...图片) => {
       // 优先检查引用消息
