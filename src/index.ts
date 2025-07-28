@@ -1,4 +1,4 @@
-import { Context, Schema, h, Session } from 'koishi'
+import { Context, Schema, h } from 'koishi'
 
 import { promises as fs } from 'node:fs'
 import { join } from 'node:path'
@@ -35,7 +35,7 @@ export const Config: Schema<Config> =
     Schema.object({
       imagePath: Schema.string().required().description('图片库路径').role('textarea', { rows: [2, 4] }),
       filenameTemplate: Schema.string().role('textarea', { rows: [2, 4] })
-        .default("${userId}-${channelId}-${date}-${index}${ext}").description('文件名模板，支持变量: ${userId}, ${username}, ${timestamp}, ${date}, ${time}, ${index}, ${ext}, ${guildId}, ${channelId}'),
+        .default("${date}-${time}-${index}-${guildId}-${userId}${ext}").description('文件名模板，支持变量: ${userId}, ${username}, ${timestamp}, ${date}, ${time}, ${index}, ${ext}, ${guildId}, ${channelId}'),
     }).description('发图功能'),
     Schema.object({
       debugMode: Schema.boolean().default(false).description('启用调试日志模式').experimental(),
@@ -89,12 +89,46 @@ export function apply(ctx: Context, config: Config) {
     return detectedExtension
   }
 
+  // 查找角色名称匹配的文件夹
+  async function findCharacterFolder(characterName: string): Promise<string | null> {
+    try {
+      // 首先检查临时存储路径是否已有对应文件夹
+      const tempFolders = await fs.readdir(config.tempPath, { withFileTypes: true })
+      for (const folder of tempFolders) {
+        if (!folder.isDirectory()) continue
+        const folderName = folder.name
+        const aliases = folderName.split('-')
+        if (aliases.includes(characterName)) {
+          loginfo('在临时路径找到匹配的文件夹:', folderName)
+          return folderName
+        }
+      }
+
+      // 如果临时路径没有，则从图片库路径查找
+      const imageFolders = await fs.readdir(config.imagePath, { withFileTypes: true })
+      for (const folder of imageFolders) {
+        if (!folder.isDirectory()) continue
+        const folderName = folder.name
+        const aliases = folderName.split('-')
+        if (aliases.includes(characterName)) {
+          loginfo('在图片库找到匹配的文件夹:', folderName)
+          return folderName
+        }
+      }
+
+      return null
+    } catch (error) {
+      loginfo('查找角色文件夹失败:', error)
+      return null
+    }
+  }
+
   // 存图指令
-  ctx.command(`${config.saveCommandName} [...图片]`, { captureQuote: false })
+  ctx.command(`${config.saveCommandName} [角色名称] [...图片]`, { captureQuote: false })
     .userFields(['id', 'name', 'authority'])
-    .action(async ({ session }, ...图片) => {
-      // 优先检查引用消息
-      if (图片.length === 0 && session.quote) {
+    .action(async ({ session }, 角色名称, ...图片) => {
+      // 优先检查引用消息中的图片
+      if (session.quote) {
         loginfo('检测到引用消息，尝试从引用消息中提取图片')
         const quoteElements = h.parse(session.quote.content)
         const quoteImages = quoteElements.filter(el => ['img', 'mface', 'image', 'video'].includes(el.type))
@@ -126,8 +160,25 @@ export function apply(ctx: Context, config: Config) {
       if (allImages.length === 0) {
         return '请发送有效的图片或视频'
       }
+
       try {
-        await fs.mkdir(config.tempPath, { recursive: true })
+        let targetPath = config.tempPath
+        let folderName = ''
+
+        // 如果指定了角色名称，则查找对应的文件夹
+        if (角色名称) {
+          const matchedFolder = await findCharacterFolder(角色名称)
+          if (matchedFolder) {
+            folderName = matchedFolder
+            targetPath = join(config.tempPath, folderName)
+            loginfo('使用匹配的角色文件夹:', folderName)
+          } else {
+            return `未找到角色"${角色名称}"对应的文件夹，请检查角色名称或别名是否正确，或该人物尚未收录，欢迎催更`
+          }
+        }
+
+        // 确保目标路径存在
+        await fs.mkdir(targetPath, { recursive: true })
 
         const baseTimestamp = Date.now()
         let savedCount = 0
@@ -165,7 +216,7 @@ export function apply(ctx: Context, config: Config) {
 
           filename = filename.replace(/[\u0000-\u001f\u007f-\u009f\/\\:*?"<>|]/g, '_')
 
-          const filepath = join(config.tempPath, filename)
+          const filepath = join(targetPath, filename)
 
           await fs.writeFile(filepath, buffer)
           savedCount++
@@ -173,7 +224,11 @@ export function apply(ctx: Context, config: Config) {
           loginfo(`保存文件 ${i + 1}/${allImages.length}:`, filename)
         }
 
-        return `已保存 ${savedCount} 个文件到临时文件夹`
+        const resultMessage = 角色名称
+          ? `已保存 ${savedCount} 个文件到"${角色名称}"文件夹`
+          : `已保存 ${savedCount} 个文件到临时文件夹`
+
+        return resultMessage
       } catch (error) {
         return `保存失败: ${error.message}`
       }

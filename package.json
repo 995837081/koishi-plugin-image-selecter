@@ -1,7 +1,7 @@
 {
   "name": "koishi-plugin-image-selecter",
   "description": "A powerful Koishi plugin for random image/video sending and user image storage with alias system support",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "main": "lib/index.js",
   "typings": "lib/index.d.ts",
   "files": [
