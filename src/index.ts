@@ -87,8 +87,6 @@ export function apply(ctx: Context, config: Config) {
     ctx.logger.warn(formatLogLine(selfId, args))
   }
 
-  const mediaRoots = [config.tempPath, config.imagePath]
-
   const isMediaElement = (element: MediaElement) => {
     return ['img', 'mface', 'image', 'video'].includes(element.type)
   }
@@ -154,8 +152,12 @@ export function apply(ctx: Context, config: Config) {
     }
   }
 
-  const resolveFolderByAlias = async (selfId: string | undefined, input: string): Promise<FolderMatch | null> => {
-    for (const rootPath of mediaRoots) {
+  const resolveFolderByAlias = async (
+    selfId: string | undefined,
+    input: string,
+    rootPaths: string[],
+  ): Promise<FolderMatch | null> => {
+    for (const rootPath of rootPaths) {
       const matchedFolders = await readFolderMatches(selfId, rootPath, input)
       if (matchedFolders.length === 0) {
         continue
@@ -214,8 +216,8 @@ export function apply(ctx: Context, config: Config) {
         let targetPath = config.tempPath
         let folderName = ''
 
-        if (roleName) {
-          const matchedFolder = await resolveFolderByAlias(session.selfId, roleName)
+      if (roleName) {
+          const matchedFolder = await resolveFolderByAlias(session.selfId, roleName, [config.tempPath])
           if (!matchedFolder) {
             return `未找到角色"${roleName}"对应的文件夹，请检查角色名称或别名是否正确，或者该角色尚未收录`
           }
@@ -286,7 +288,7 @@ export function apply(ctx: Context, config: Config) {
     }
 
     try {
-      const matchedFolder = await resolveFolderByAlias(session.selfId, input)
+      const matchedFolder = await resolveFolderByAlias(session.selfId, input, [config.imagePath])
       if (!matchedFolder) {
         return next()
       }
