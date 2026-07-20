@@ -46,6 +46,12 @@ type FolderMatch = {
   folderPath: string
 }
 
+type FolderCacheState = {
+  loaded: boolean
+  folderNames: string[]
+  folderNameSet: Set<string>
+}
+
 export const Config: Schema<Config> = Schema.intersect([
   Schema.object({
     saveCommandName: Schema.string().default('存图').description('存图指令名称'),
@@ -65,6 +71,8 @@ export const Config: Schema<Config> = Schema.intersect([
 ])
 
 export function apply(ctx: Context, config: Config) {
+  const folderCaches = new Map<string, FolderCacheState>()
+
   const formatLogLine = (selfId: string | undefined, args: unknown[]) => {
     const content = args
       .map((arg) => {
@@ -130,17 +138,62 @@ export function apply(ctx: Context, config: Config) {
     return ''
   }
 
-  const readFolderMatches = async (selfId: string | undefined, rootPath: string, input: string) => {
+  const getFolderCache = (rootPath: string) => {
+    let cache = folderCaches.get(rootPath)
+    if (!cache) {
+      cache = {
+        loaded: false,
+        folderNames: [],
+        folderNameSet: new Set(),
+      }
+      folderCaches.set(rootPath, cache)
+    }
+    return cache
+  }
+
+  const refreshFolderCache = async (selfId: string | undefined, rootPath: string) => {
     try {
       const folders = await fs.readdir(rootPath, { withFileTypes: true })
-      return folders
+      const folderNames = folders
         .filter((folder) => folder.isDirectory())
         .map((folder) => folder.name)
-        .filter((folderName) => folderName.split('-').includes(input))
+
+      const cache = getFolderCache(rootPath)
+      cache.folderNames = folderNames
+      cache.folderNameSet = new Set(folderNames)
+      cache.loaded = true
+
+      loginfo(selfId, `目录缓存已更新: ${rootPath} 共 ${folderNames.length} 个文件夹`)
+      return cache
     } catch (error) {
       loginfo(selfId, `扫描目录失败: ${rootPath}`, error)
-      return []
+      const cache = getFolderCache(rootPath)
+      cache.loaded = true
+      return cache
     }
+  }
+
+  const ensureFolderCache = async (selfId: string | undefined, rootPath: string) => {
+    const cache = getFolderCache(rootPath)
+    if (!cache.loaded) {
+      await refreshFolderCache(selfId, rootPath)
+    }
+    return cache
+  }
+
+  const touchFolderCache = (rootPath: string, folderName: string) => {
+    const cache = getFolderCache(rootPath)
+    if (!cache.folderNameSet.has(folderName)) {
+      cache.folderNameSet.add(folderName)
+      cache.folderNames.push(folderName)
+    }
+    cache.loaded = true
+  }
+
+  const readFolderMatches = async (selfId: string | undefined, rootPath: string, input: string) => {
+    await ensureFolderCache(selfId, rootPath)
+    const cache = getFolderCache(rootPath)
+    return cache.folderNames.filter((folderName) => folderName.split('-').includes(input))
   }
 
   const resolveFolderByAlias = async (
@@ -170,6 +223,10 @@ export function apply(ctx: Context, config: Config) {
   const parseMediaElements = (content: string) => {
     return h.parse(content).filter((element) => isMediaElement(element))
   }
+
+  // 启动时预热常用目录缓存，避免首条消息触发扫描
+  void refreshFolderCache(undefined, config.imagePath)
+  void refreshFolderCache(undefined, config.tempPath)
 
   // 存图命令
   ctx.command(`${config.saveCommandName} [角色名称] [...图片]`, { captureQuote: false })
@@ -205,8 +262,8 @@ export function apply(ctx: Context, config: Config) {
         let folderName = ''
 
         if (roleName) {
-          // 存图时优先按图库里的标准文件夹名来定名
-          const matchedFolder = await resolveFolderByAlias(session.selfId, roleName, [config.imagePath, config.tempPath])
+          // 存图时只按图库目录确定标准文件夹名
+          const matchedFolder = await resolveFolderByAlias(session.selfId, roleName, [config.imagePath])
           if (!matchedFolder) {
             return `未找到角色"${roleName}"对应的文件夹，请检查角色名称或别名是否正确，或者该角色尚未收录`
           }
@@ -217,6 +274,9 @@ export function apply(ctx: Context, config: Config) {
         }
 
         await fs.mkdir(targetPath, { recursive: true })
+        if (folderName) {
+          touchFolderCache(config.tempPath, folderName)
+        }
 
         const baseTimestamp = Date.now()
         let savedCount = 0
