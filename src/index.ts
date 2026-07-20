@@ -2,19 +2,20 @@ import { Context, Schema, h } from 'koishi'
 
 import { promises as fs } from 'node:fs'
 import { join } from 'node:path'
+import { inspect } from 'node:util'
 
 export const name = 'image-selecter'
 export const inject = {
-  required: ['http', 'logger']
-};
+  required: ['http', 'logger'],
+}
 
 export const usage = `
 ---
 
-<a target="_blank" href="https://www.npmjs.com/package/koishi-plugin-image-selecter">➤ 食用方法点此获取</a>
+<a target="_blank" href="https://www.npmjs.com/package/koishi-plugin-image-selecter">点击查看使用方法</a>
 
 ---
-`;
+`
 
 export interface Config {
   tempPath: string
@@ -25,39 +26,78 @@ export interface Config {
   saveCommandName: string
 }
 
-export const Config: Schema<Config> =
-  Schema.intersect([
-    Schema.object({
-      saveCommandName: Schema.string().default('存图').description('存图指令名称'),
-      tempPath: Schema.string().required().description('临时存储路径').role('textarea', { rows: [2, 4] }),
-      promptTimeout: Schema.number().default(30).description('等待用户发送图片的超时时间 (秒)'),
-    }).description('存图功能'),
-    Schema.object({
-      imagePath: Schema.string().required().description('图片库路径').role('textarea', { rows: [2, 4] }),
-      filenameTemplate: Schema.string().role('textarea', { rows: [2, 4] })
-        .default("${date}-${time}-${index}-${guildId}-${userId}${ext}").description('文件名模板，支持变量: ${userId}, ${username}, ${timestamp}, ${date}, ${time}, ${index}, ${ext}, ${guildId}, ${channelId}'),
-    }).description('发图功能'),
-    Schema.object({
-      debugMode: Schema.boolean().default(false).description('启用调试日志模式').experimental(),
-    }).description('调试模式'),
-  ]);
+type HttpFile = {
+  type?: string
+  mime?: string
+  data?: ArrayBuffer | ArrayBufferView | string | Buffer
+}
 
+type MediaElement = {
+  type: string
+  attrs: {
+    src?: string
+    url?: string
+  }
+}
+
+type FolderMatch = {
+  rootPath: string
+  folderName: string
+  folderPath: string
+}
+
+export const Config: Schema<Config> = Schema.intersect([
+  Schema.object({
+    saveCommandName: Schema.string().default('存图').description('存图指令名称'),
+    tempPath: Schema.string().required().description('临时存储路径').role('textarea', { rows: [2, 4] }),
+    promptTimeout: Schema.number().default(30).description('等待用户发送图片的超时时间(秒)'),
+  }).description('存图功能'),
+  Schema.object({
+    imagePath: Schema.string().required().description('图片库路径').role('textarea', { rows: [2, 4] }),
+    filenameTemplate: Schema.string()
+      .role('textarea', { rows: [2, 4] })
+      .default('${date}-${time}-${index}-${guildId}-${userId}${ext}')
+      .description('文件名模板，支持变量: ${userId}, ${username}, ${timestamp}, ${date}, ${time}, ${index}, ${ext}, ${guildId}, ${channelId}'),
+  }).description('发图功能'),
+  Schema.object({
+    debugMode: Schema.boolean().default(false).description('启用调试日志模式').experimental(),
+  }).description('调试模式'),
+])
 
 export function apply(ctx: Context, config: Config) {
+  const formatLogLine = (selfId: string | undefined, args: unknown[]) => {
+    const content = args
+      .map((arg) => {
+        if (typeof arg === 'string') return arg
+        if (arg instanceof Error) return arg.stack || arg.message
+        return inspect(arg, { depth: null, compact: true, breakLength: Infinity })
+      })
+      .join(' ')
 
-  function loginfo(...args: any[]) {
+    return selfId ? `[${selfId}] ${content}` : content
+  }
+
+  const loginfo = (selfId: string | undefined, ...args: unknown[]) => {
     if (config.debugMode) {
-      (ctx.logger.info as (...args: any[]) => void)(...args);
+      ctx.logger.info(formatLogLine(selfId, args))
     }
   }
 
-  const getFileExtension = (file: any, imgType: string) => {
-    loginfo('文件信息:', JSON.stringify(file, null, 2))
+  const logwarn = (selfId: string | undefined, ...args: unknown[]) => {
+    ctx.logger.warn(formatLogLine(selfId, args))
+  }
 
-    let detectedExtension = ''
+  const mediaRoots = [config.tempPath, config.imagePath]
 
-    // 优先根据 file.type 和 file.mime 确定后缀名
+  const isMediaElement = (element: MediaElement) => {
+    return ['img', 'mface', 'image', 'video'].includes(element.type)
+  }
+
+  const getFileExtension = (file: HttpFile, mediaType: string) => {
+    loginfo(undefined, '文件信息:', file)
+
     const mimeType = file.type || file.mime
+    let detectedExtension = ''
 
     if (mimeType === 'image/jpeg') {
       detectedExtension = '.jpg'
@@ -76,85 +116,94 @@ export function apply(ctx: Context, config: Config) {
     } else if (mimeType === 'video/x-msvideo') {
       detectedExtension = '.avi'
     } else if (mimeType) {
-      // 如果有 type 或 mime，但不是常见的类型，则记录警告
-      loginfo(`未知的文件类型，file.type=${file.type}, file.mime=${file.mime}`)
-      detectedExtension = imgType === 'video' ? '.mp4' : '.jpg'
+      loginfo(undefined, `未知的文件类型，file.type=${file.type}, file.mime=${file.mime}`)
+      detectedExtension = mediaType === 'video' ? '.mp4' : '.jpg'
     } else {
-      // 如果没有任何类型信息，则使用默认值
-      loginfo(`无法检测到文件类型，file.type=${file.type}, file.mime=${file.mime}`)
-      detectedExtension = imgType === 'video' ? '.mp4' : '.jpg'
+      loginfo(undefined, `无法检测到文件类型，file.type=${file.type}, file.mime=${file.mime}`)
+      detectedExtension = mediaType === 'video' ? '.mp4' : '.jpg'
     }
 
-    loginfo('检测到的文件扩展名:', detectedExtension)
+    loginfo(undefined, '检测到的文件扩展名:', detectedExtension)
     return detectedExtension
   }
 
-  // 查找角色名称匹配的文件夹
-  async function findCharacterFolder(characterName: string): Promise<string | null> {
+  const getMimeTypeByFilename = (filename: string) => {
+    const ext = filename.split('.').pop()?.toLowerCase()
+    if (ext === 'jpg' || ext === 'jpeg') return 'image/jpeg'
+    if (ext === 'png') return 'image/png'
+    if (ext === 'gif') return 'image/gif'
+    if (ext === 'webp') return 'image/webp'
+    if (ext === 'bmp') return 'image/bmp'
+    if (ext === 'tif' || ext === 'tiff') return 'image/tiff'
+    if (ext === 'mp4') return 'video/mp4'
+    if (ext === 'mov') return 'video/quicktime'
+    if (ext === 'avi') return 'video/x-msvideo'
+    return ''
+  }
+
+  const readFolderMatches = async (rootPath: string, input: string) => {
     try {
-      // 首先检查临时存储路径是否已有对应文件夹
-      const tempFolders = await fs.readdir(config.tempPath, { withFileTypes: true })
-      for (const folder of tempFolders) {
-        if (!folder.isDirectory()) continue
-        const folderName = folder.name
-        const aliases = folderName.split('-')
-        if (aliases.includes(characterName)) {
-          loginfo('在临时路径找到匹配的文件夹:', folderName)
-          return folderName
-        }
-      }
-
-      // 如果临时路径没有，则从图片库路径查找
-      const imageFolders = await fs.readdir(config.imagePath, { withFileTypes: true })
-      for (const folder of imageFolders) {
-        if (!folder.isDirectory()) continue
-        const folderName = folder.name
-        const aliases = folderName.split('-')
-        if (aliases.includes(characterName)) {
-          loginfo('在图片库找到匹配的文件夹:', folderName)
-          return folderName
-        }
-      }
-
-      return null
+      const folders = await fs.readdir(rootPath, { withFileTypes: true })
+      return folders
+        .filter((folder) => folder.isDirectory())
+        .map((folder) => folder.name)
+        .filter((folderName) => folderName.split('-').includes(input))
     } catch (error) {
-      loginfo('查找角色文件夹失败:', error)
-      return null
+      loginfo(undefined, `扫描目录失败: ${rootPath}`, error)
+      return []
     }
   }
 
-  // 存图指令
+  const resolveFolderByAlias = async (input: string): Promise<FolderMatch | null> => {
+    for (const rootPath of mediaRoots) {
+      const matchedFolders = await readFolderMatches(rootPath, input)
+      if (matchedFolders.length === 0) {
+        continue
+      }
+
+      if (matchedFolders.length > 1) {
+        logwarn(undefined, `检测到别名重名: 输入"${input}"匹配到 ${matchedFolders.length} 个文件夹: ${matchedFolders.join(', ')}`)
+      }
+
+      const folderName = matchedFolders[Math.floor(Math.random() * matchedFolders.length)]
+      return {
+        rootPath,
+        folderName,
+        folderPath: join(rootPath, folderName),
+      }
+    }
+
+    return null
+  }
+
+  const parseMediaElements = (content: string) => {
+    return h.parse(content).filter((element) => isMediaElement(element as MediaElement)) as MediaElement[]
+  }
+
   ctx.command(`${config.saveCommandName} [角色名称] [...图片]`, { captureQuote: false })
     .userFields(['id', 'name', 'authority'])
-    .action(async ({ session }, 角色名称, ...图片) => {
-      // 优先检查引用消息中的图片
+    .action(async ({ session }, roleName, ...images) => {
       if (session.quote) {
-        loginfo('检测到引用消息，尝试从引用消息中提取图片')
-        const quoteElements = h.parse(session.quote.content)
-        const quoteImages = quoteElements.filter(el => ['img', 'mface', 'image', 'video'].includes(el.type))
-
+        loginfo(session.selfId, '检测到引用消息，尝试从引用消息中提取图片')
+        const quoteImages = parseMediaElements(session.quote.content)
         if (quoteImages.length > 0) {
-          loginfo('从引用消息中找到图片:', quoteImages.length, '个')
-          图片 = [session.quote.content]
+          loginfo(session.selfId, '从引用消息中找到图片:', quoteImages.length, '个')
+          images = [session.quote.content]
         }
       }
 
-      // 如果没有图片参数且没有引用消息中的图片，则交互式获取
-      if (图片.length === 0) {
+      if (images.length === 0) {
         await session.send('请发送图片或视频')
         const promptResult = await session.prompt(config.promptTimeout * 1000)
         if (!promptResult) {
           return '未收到图片或视频'
         }
-        图片 = [promptResult]
+        images = [promptResult]
       }
 
-      // 解析所有图片参数
-      let allImages = []
-      for (const 图片Item of 图片) {
-        const elements = h.parse(图片Item)
-        const images = elements.filter(el => ['img', 'mface', 'image', 'video'].includes(el.type))
-        allImages.push(...images)
+      const allImages: MediaElement[] = []
+      for (const imageItem of images) {
+        allImages.push(...parseMediaElements(imageItem))
       }
 
       if (allImages.length === 0) {
@@ -165,19 +214,17 @@ export function apply(ctx: Context, config: Config) {
         let targetPath = config.tempPath
         let folderName = ''
 
-        // 如果指定了角色名称，则查找对应的文件夹
-        if (角色名称) {
-          const matchedFolder = await findCharacterFolder(角色名称)
-          if (matchedFolder) {
-            folderName = matchedFolder
-            targetPath = join(config.tempPath, folderName)
-            loginfo('使用匹配的角色文件夹:', folderName)
-          } else {
-            return `未找到角色"${角色名称}"对应的文件夹，请检查角色名称或别名是否正确，或该人物尚未收录，欢迎催更`
+        if (roleName) {
+          const matchedFolder = await resolveFolderByAlias(roleName)
+          if (!matchedFolder) {
+            return `未找到角色"${roleName}"对应的文件夹，请检查角色名称或别名是否正确，或者该角色尚未收录`
           }
+
+          folderName = matchedFolder.folderName
+          targetPath = join(config.tempPath, folderName)
+          loginfo(session.selfId, '使用匹配到的角色文件夹:', matchedFolder.folderPath)
         }
 
-        // 确保目标路径存在
         await fs.mkdir(targetPath, { recursive: true })
 
         const baseTimestamp = Date.now()
@@ -186,18 +233,19 @@ export function apply(ctx: Context, config: Config) {
         for (let i = 0; i < allImages.length; i++) {
           const img = allImages[i]
           const url = img.attrs.src || img.attrs.url
-          if (!url) continue
+          if (!url) {
+            continue
+          }
 
           const file = await ctx.http.file(url)
           if (!file || !file.data) {
-            loginfo('无法获取文件数据:', url)
+            loginfo(session.selfId, '无法获取文件数据:', url)
             continue
           }
 
           const buffer = Buffer.from(file.data)
           const ext = getFileExtension(file, img.type)
 
-          // 使用基础时间戳 + 微秒偏移确保唯一性
           const timestamp = baseTimestamp + i
           const now = new Date(timestamp)
           const date = now.toISOString().split('T')[0]
@@ -217,89 +265,60 @@ export function apply(ctx: Context, config: Config) {
           filename = filename.replace(/[\u0000-\u001f\u007f-\u009f\/\\:*?"<>|]/g, '_')
 
           const filepath = join(targetPath, filename)
-
           await fs.writeFile(filepath, buffer)
           savedCount++
 
-          loginfo(`保存文件 ${i + 1}/${allImages.length}:`, filename)
+          loginfo(session.selfId, `保存文件 ${i + 1}/${allImages.length}:`, filename)
         }
 
-        const resultMessage = 角色名称
-          ? `已保存 ${savedCount} 个文件到"${角色名称}"文件夹`
-          : `已保存 ${savedCount} 个文件到临时文件夹`
-
-        return resultMessage
+        return roleName
+          ? `已保存${savedCount} 个文件到"${roleName}"文件夹`
+          : `已保存${savedCount} 个文件到临时文件夹`
       } catch (error) {
-        return `保存失败: ${error.message}`
+        return `保存失败: ${error instanceof Error ? error.message : String(error)}`
       }
     })
 
-  // 发图中间件
   ctx.middleware(async (session, next) => {
     const input = session.stripped.content.trim()
-    if (!input) return next()
-
-    // loginfo('收到消息:', {
-    //   userId: session.userId,
-    //   username: session.username,
-    //   guildId: session.guildId,
-    //   channelId: session.channelId,
-    //   content: input
-    // })
+    if (!input) {
+      return next()
+    }
 
     try {
-      const folders = await fs.readdir(config.imagePath, { withFileTypes: true })
-      const matchedFolders = []
-
-      // 收集所有匹配的文件夹
-      for (const folder of folders) {
-        if (!folder.isDirectory()) continue
-
-        const folderName = folder.name
-        const aliases = folderName.split('-')
-
-        if (aliases.includes(input)) {
-          matchedFolders.push(folderName)
-        }
-      }
-
-      if (matchedFolders.length === 0) {
+      const matchedFolder = await resolveFolderByAlias(input)
+      if (!matchedFolder) {
         return next()
       }
 
-      loginfo('匹配到的文件夹:', matchedFolders)
+      const files = await fs.readdir(matchedFolder.folderPath)
+      const mediaFiles = files.filter((file) => /\.(jpe?g|png|gif|webp|mp4|mov|avi|bmp|tiff?)$/i.test(file))
 
-      // 检测别名重名并输出警告
-      if (matchedFolders.length > 1) {
-        ctx.logger.warn(`检测到别名重名: 输入"${input}"匹配到${matchedFolders.length}个文件夹: ${matchedFolders.join(', ')}`)
-      }
-
-      // 随机选择一个匹配的文件夹
-      const selectedFolder = matchedFolders[Math.floor(Math.random() * matchedFolders.length)]
-      loginfo('随机选择文件夹:', selectedFolder)
-
-      const folderPath = join(config.imagePath, selectedFolder)
-      const files = await fs.readdir(folderPath)
-      const mediaFiles = files.filter(file =>
-        /\.(jpe?g|png|gif|webp|mp4|mov|avi|bmp|tiff?)$/i.test(file)
-      )
       if (mediaFiles.length === 0) {
         return '该文件夹暂无图片或视频'
       }
 
-      // 从选定的文件夹中随机选择一个文件
       const randomFile = mediaFiles[Math.floor(Math.random() * mediaFiles.length)]
-      const filePath = join(folderPath, randomFile)
+      const filePath = join(matchedFolder.folderPath, randomFile)
 
-      loginfo('随机选择文件:', randomFile)
+      loginfo(
+        session.selfId,
+        `输入"${input}"命中目录: ${inspect([matchedFolder.folderName], { compact: true, breakLength: Infinity })};`,
+        `根目录: ${matchedFolder.rootPath};`,
+        `随机选中文件夹: ${matchedFolder.folderPath};`,
+        `随机选中文件: ${randomFile}`
+      )
 
       const isVideo = /\.(mp4|mov|avi)$/i.test(randomFile)
-      const element = isVideo
-        ? h.video(filePath)
-        : h.image(filePath)
+      const fileBuffer = await fs.readFile(filePath)
+      const mimeType = getMimeTypeByFilename(randomFile)
 
-      await session.send(element)
-      return next()
+      // 用二进制发送，避免 QQ 适配器把本地路径当成远程资源去 fetch
+      await session.send(
+        isVideo
+          ? h.video(fileBuffer, mimeType || 'video/mp4')
+          : h.image(fileBuffer, mimeType || 'image/jpeg')
+      )
     } catch (error) {
       loginfo('发图失败:', error)
     }
