@@ -87,42 +87,33 @@ export function apply(ctx: Context, config: Config) {
     ctx.logger.warn(formatLogLine(selfId, args))
   }
 
-  const isMediaElement = (element: MediaElement) => {
-    return ['img', 'mface', 'image', 'video'].includes(element.type)
+  const isMediaElement = (element: { type?: string }) => {
+    return !!element.type && ['img', 'mface', 'image', 'video'].includes(element.type)
   }
 
   const getFileExtension = (selfId: string | undefined, file: HttpFile, mediaType: string) => {
     loginfo(selfId, '文件信息:', file)
 
     const mimeType = file.type || file.mime
-    let detectedExtension = ''
 
-    if (mimeType === 'image/jpeg') {
-      detectedExtension = '.jpg'
-    } else if (mimeType === 'image/png') {
-      detectedExtension = '.png'
-    } else if (mimeType === 'image/gif') {
-      detectedExtension = '.gif'
-    } else if (mimeType === 'image/webp') {
-      detectedExtension = '.webp'
-    } else if (mimeType === 'image/bmp') {
-      detectedExtension = '.bmp'
-    } else if (mimeType === 'video/mp4') {
-      detectedExtension = '.mp4'
-    } else if (mimeType === 'video/quicktime') {
-      detectedExtension = '.mov'
-    } else if (mimeType === 'video/x-msvideo') {
-      detectedExtension = '.avi'
-    } else if (mimeType) {
+    if (mimeType === 'image/jpeg') return '.jpg'
+    if (mimeType === 'image/png') return '.png'
+    if (mimeType === 'image/gif') return '.gif'
+    if (mimeType === 'image/webp') return '.webp'
+    if (mimeType === 'image/bmp') return '.bmp'
+    if (mimeType === 'video/mp4') return '.mp4'
+    if (mimeType === 'video/quicktime') return '.mov'
+    if (mimeType === 'video/x-msvideo') return '.avi'
+
+    if (mimeType) {
       loginfo(selfId, `未知的文件类型，file.type=${file.type}, file.mime=${file.mime}`)
-      detectedExtension = mediaType === 'video' ? '.mp4' : '.jpg'
     } else {
       loginfo(selfId, `无法检测到文件类型，file.type=${file.type}, file.mime=${file.mime}`)
-      detectedExtension = mediaType === 'video' ? '.mp4' : '.jpg'
     }
 
-    loginfo(selfId, '检测到的文件扩展名:', detectedExtension)
-    return detectedExtension
+    const fallback = mediaType === 'video' ? '.mp4' : '.jpg'
+    loginfo(selfId, '检测到的文件扩展名:', fallback)
+    return fallback
   }
 
   const getMimeTypeByFilename = (filename: string) => {
@@ -159,9 +150,7 @@ export function apply(ctx: Context, config: Config) {
   ): Promise<FolderMatch | null> => {
     for (const rootPath of rootPaths) {
       const matchedFolders = await readFolderMatches(selfId, rootPath, input)
-      if (matchedFolders.length === 0) {
-        continue
-      }
+      if (matchedFolders.length === 0) continue
 
       if (matchedFolders.length > 1) {
         logwarn(selfId, `检测到别名重名: 输入"${input}"匹配到 ${matchedFolders.length} 个文件夹: ${matchedFolders.join(', ')}`)
@@ -179,9 +168,10 @@ export function apply(ctx: Context, config: Config) {
   }
 
   const parseMediaElements = (content: string) => {
-    return h.parse(content).filter((element) => isMediaElement(element as MediaElement)) as MediaElement[]
+    return h.parse(content).filter((element) => isMediaElement(element))
   }
 
+  // 存图命令
   ctx.command(`${config.saveCommandName} [角色名称] [...图片]`, { captureQuote: false })
     .userFields(['id', 'name', 'authority'])
     .action(async ({ session }, roleName, ...images) => {
@@ -197,9 +187,7 @@ export function apply(ctx: Context, config: Config) {
       if (images.length === 0) {
         await session.send('请发送图片或视频')
         const promptResult = await session.prompt(config.promptTimeout * 1000)
-        if (!promptResult) {
-          return '未收到图片或视频'
-        }
+        if (!promptResult) return '未收到图片或视频'
         images = [promptResult]
       }
 
@@ -216,15 +204,16 @@ export function apply(ctx: Context, config: Config) {
         let targetPath = config.tempPath
         let folderName = ''
 
-      if (roleName) {
-          const matchedFolder = await resolveFolderByAlias(session.selfId, roleName, [config.tempPath])
+        if (roleName) {
+          // 存图时优先按图库里的标准文件夹名来定名
+          const matchedFolder = await resolveFolderByAlias(session.selfId, roleName, [config.imagePath, config.tempPath])
           if (!matchedFolder) {
             return `未找到角色"${roleName}"对应的文件夹，请检查角色名称或别名是否正确，或者该角色尚未收录`
           }
 
           folderName = matchedFolder.folderName
           targetPath = join(config.tempPath, folderName)
-          loginfo(session.selfId, '使用匹配到的角色文件夹:', matchedFolder.folderPath)
+          loginfo(session.selfId, `存图使用标准目录: ${matchedFolder.folderPath} -> ${targetPath}`)
         }
 
         await fs.mkdir(targetPath, { recursive: true })
@@ -235,9 +224,7 @@ export function apply(ctx: Context, config: Config) {
         for (let i = 0; i < allImages.length; i++) {
           const img = allImages[i]
           const url = img.attrs.src || img.attrs.url
-          if (!url) {
-            continue
-          }
+          if (!url) continue
 
           const file = await ctx.http.file(url)
           if (!file || !file.data) {
@@ -256,46 +243,42 @@ export function apply(ctx: Context, config: Config) {
           let filename = config.filenameTemplate
             .replace(/\$\{userId\}/g, session.userId || 'unknown')
             .replace(/\$\{username\}/g, session.username || 'unknown')
-            .replace(/\$\{timestamp\}/g, timestamp.toString())
+            .replace(/\$\{timestamp\}/g, String(timestamp))
             .replace(/\$\{date\}/g, date)
             .replace(/\$\{time\}/g, time)
-            .replace(/\$\{index\}/g, (i + 1).toString())
+            .replace(/\$\{index\}/g, String(i + 1))
             .replace(/\$\{ext\}/g, ext)
             .replace(/\$\{guildId\}/g, session.guildId || 'private')
             .replace(/\$\{channelId\}/g, session.channelId || 'unknown')
 
           filename = filename.replace(/[\u0000-\u001f\u007f-\u009f\/\\:*?"<>|]/g, '_')
 
-          const filepath = join(targetPath, filename)
-          await fs.writeFile(filepath, buffer)
+          await fs.writeFile(join(targetPath, filename), buffer)
           savedCount++
 
           loginfo(session.selfId, `保存文件 ${i + 1}/${allImages.length}:`, filename)
         }
 
         return roleName
-          ? `已保存${savedCount} 个文件到"${roleName}"文件夹`
+          ? `已保存${savedCount} 个文件到"${folderName}"文件夹`
           : `已保存${savedCount} 个文件到临时文件夹`
       } catch (error) {
         return `保存失败: ${error instanceof Error ? error.message : String(error)}`
       }
     })
 
+  // 发图中间件
   ctx.middleware(async (session, next) => {
     const input = session.stripped.content.trim()
-    if (!input) {
-      return next()
-    }
+    if (!input) return next()
 
     try {
+      // 发图只从图库目录读取，避免把待审核目录里的文件提前发出去
       const matchedFolder = await resolveFolderByAlias(session.selfId, input, [config.imagePath])
-      if (!matchedFolder) {
-        return next()
-      }
+      if (!matchedFolder) return next()
 
       const files = await fs.readdir(matchedFolder.folderPath)
       const mediaFiles = files.filter((file) => /\.(jpe?g|png|gif|webp|mp4|mov|avi|bmp|tiff?)$/i.test(file))
-
       if (mediaFiles.length === 0) {
         return '该文件夹暂无图片或视频'
       }
@@ -303,20 +286,23 @@ export function apply(ctx: Context, config: Config) {
       const randomFile = mediaFiles[Math.floor(Math.random() * mediaFiles.length)]
       const filePath = join(matchedFolder.folderPath, randomFile)
 
-      loginfo(session.selfId, `输入"${input}"命中目录: [ '${matchedFolder.folderName}' ] 根目录: ${matchedFolder.rootPath} 随机选中文件夹: ${matchedFolder.folderPath} 随机选中文件: ${randomFile}`)
+      loginfo(
+        session.selfId,
+        `输入"${input}"命中目录: [ '${matchedFolder.folderName}' ] 根目录: ${matchedFolder.rootPath} 随机选中文件夹: ${matchedFolder.folderPath} 随机选中文件: ${randomFile}`,
+      )
 
-      const isVideo = /\.(mp4|mov|avi)$/i.test(randomFile)
       const fileBuffer = await fs.readFile(filePath)
       const mimeType = getMimeTypeByFilename(randomFile)
+      const isVideo = /\.(mp4|mov|avi)$/i.test(randomFile)
 
-      // 用二进制发送，避免 QQ 适配器把本地路径当成远程资源去 fetch
+      // 直接发送二进制，避免 QQ 适配器把本地路径当成远程资源 fetch
       await session.send(
         isVideo
           ? h.video(fileBuffer, mimeType || 'video/mp4')
-          : h.image(fileBuffer, mimeType || 'image/jpeg')
+          : h.image(fileBuffer, mimeType || 'image/jpeg'),
       )
     } catch (error) {
-      loginfo('发图失败:', error)
+      loginfo(session.selfId, '发图失败:', error)
     }
 
     return next()
