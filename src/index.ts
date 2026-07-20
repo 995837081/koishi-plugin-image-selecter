@@ -93,8 +93,8 @@ export function apply(ctx: Context, config: Config) {
     return ['img', 'mface', 'image', 'video'].includes(element.type)
   }
 
-  const getFileExtension = (file: HttpFile, mediaType: string) => {
-    loginfo(undefined, '文件信息:', file)
+  const getFileExtension = (selfId: string | undefined, file: HttpFile, mediaType: string) => {
+    loginfo(selfId, '文件信息:', file)
 
     const mimeType = file.type || file.mime
     let detectedExtension = ''
@@ -116,14 +116,14 @@ export function apply(ctx: Context, config: Config) {
     } else if (mimeType === 'video/x-msvideo') {
       detectedExtension = '.avi'
     } else if (mimeType) {
-      loginfo(undefined, `未知的文件类型，file.type=${file.type}, file.mime=${file.mime}`)
+      loginfo(selfId, `未知的文件类型，file.type=${file.type}, file.mime=${file.mime}`)
       detectedExtension = mediaType === 'video' ? '.mp4' : '.jpg'
     } else {
-      loginfo(undefined, `无法检测到文件类型，file.type=${file.type}, file.mime=${file.mime}`)
+      loginfo(selfId, `无法检测到文件类型，file.type=${file.type}, file.mime=${file.mime}`)
       detectedExtension = mediaType === 'video' ? '.mp4' : '.jpg'
     }
 
-    loginfo(undefined, '检测到的文件扩展名:', detectedExtension)
+    loginfo(selfId, '检测到的文件扩展名:', detectedExtension)
     return detectedExtension
   }
 
@@ -141,7 +141,7 @@ export function apply(ctx: Context, config: Config) {
     return ''
   }
 
-  const readFolderMatches = async (rootPath: string, input: string) => {
+  const readFolderMatches = async (selfId: string | undefined, rootPath: string, input: string) => {
     try {
       const folders = await fs.readdir(rootPath, { withFileTypes: true })
       return folders
@@ -149,20 +149,20 @@ export function apply(ctx: Context, config: Config) {
         .map((folder) => folder.name)
         .filter((folderName) => folderName.split('-').includes(input))
     } catch (error) {
-      loginfo(undefined, `扫描目录失败: ${rootPath}`, error)
+      loginfo(selfId, `扫描目录失败: ${rootPath}`, error)
       return []
     }
   }
 
-  const resolveFolderByAlias = async (input: string): Promise<FolderMatch | null> => {
+  const resolveFolderByAlias = async (selfId: string | undefined, input: string): Promise<FolderMatch | null> => {
     for (const rootPath of mediaRoots) {
-      const matchedFolders = await readFolderMatches(rootPath, input)
+      const matchedFolders = await readFolderMatches(selfId, rootPath, input)
       if (matchedFolders.length === 0) {
         continue
       }
 
       if (matchedFolders.length > 1) {
-        logwarn(undefined, `检测到别名重名: 输入"${input}"匹配到 ${matchedFolders.length} 个文件夹: ${matchedFolders.join(', ')}`)
+        logwarn(selfId, `检测到别名重名: 输入"${input}"匹配到 ${matchedFolders.length} 个文件夹: ${matchedFolders.join(', ')}`)
       }
 
       const folderName = matchedFolders[Math.floor(Math.random() * matchedFolders.length)]
@@ -215,7 +215,7 @@ export function apply(ctx: Context, config: Config) {
         let folderName = ''
 
         if (roleName) {
-          const matchedFolder = await resolveFolderByAlias(roleName)
+          const matchedFolder = await resolveFolderByAlias(session.selfId, roleName)
           if (!matchedFolder) {
             return `未找到角色"${roleName}"对应的文件夹，请检查角色名称或别名是否正确，或者该角色尚未收录`
           }
@@ -244,7 +244,7 @@ export function apply(ctx: Context, config: Config) {
           }
 
           const buffer = Buffer.from(file.data)
-          const ext = getFileExtension(file, img.type)
+          const ext = getFileExtension(session.selfId, file, img.type)
 
           const timestamp = baseTimestamp + i
           const now = new Date(timestamp)
@@ -286,7 +286,7 @@ export function apply(ctx: Context, config: Config) {
     }
 
     try {
-      const matchedFolder = await resolveFolderByAlias(input)
+      const matchedFolder = await resolveFolderByAlias(session.selfId, input)
       if (!matchedFolder) {
         return next()
       }
@@ -301,13 +301,7 @@ export function apply(ctx: Context, config: Config) {
       const randomFile = mediaFiles[Math.floor(Math.random() * mediaFiles.length)]
       const filePath = join(matchedFolder.folderPath, randomFile)
 
-      loginfo(
-        session.selfId,
-        `输入"${input}"命中目录: ${inspect([matchedFolder.folderName], { compact: true, breakLength: Infinity })};`,
-        `根目录: ${matchedFolder.rootPath};`,
-        `随机选中文件夹: ${matchedFolder.folderPath};`,
-        `随机选中文件: ${randomFile}`
-      )
+      loginfo(session.selfId, `输入"${input}"命中目录: [ '${matchedFolder.folderName}' ] 根目录: ${matchedFolder.rootPath} 随机选中文件夹: ${matchedFolder.folderPath} 随机选中文件: ${randomFile}`)
 
       const isVideo = /\.(mp4|mov|avi)$/i.test(randomFile)
       const fileBuffer = await fs.readFile(filePath)
